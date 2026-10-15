@@ -304,7 +304,8 @@ def test_serial_discovery_reuses_entry_and_relinks_legacy(modules):
     )
     sys.modules["homeassistant.helpers"].selector = select
     _module("homeassistant.components.bluetooth", BluetoothServiceInfo=object,
-            async_discovered_service_info=lambda hass: [])
+            async_discovered_service_info=lambda hass: [],
+            async_last_service_info=lambda hass, address, connectable: None)
     _module("homeassistant.config_entries", ConfigEntry=object, ConfigFlow=FlowBase,
             ConfigFlowResult=dict, OptionsFlow=object)
     _module("homeassistant.const", CONF_ADDRESS="address", CONF_NAME="name")
@@ -344,11 +345,96 @@ def test_serial_discovery_reuses_entry_and_relinks_legacy(modules):
     assert entry.data["address"] == "ANOTHER:ADDRESS"
 
     Probe.serial = None
+    legacy = types.SimpleNamespace(
+        entry_id="legacy-entry", unique_id="OLD:ADDRESS", title="Right",
+        data={"address": "OLD:ADDRESS"},
+    )
+    hass.config_entries.entries = [legacy]
+    hass.data = {"nubert": {legacy.entry_id: {"coordinator": types.SimpleNamespace(connected=False)}}}
     unknown = flow_module.NubertConfigFlow()
     unknown.hass = hass
-    assert asyncio.run(unknown._async_identify("UNKNOWN:ADDRESS", discovery=True)) == {
-        "abort": "serial_unavailable"
+    unknown.context = {}
+    discovered = types.SimpleNamespace(
+        address="UNKNOWN:ADDRESS", name="Nubert",
+        service_uuids=[next(iter(modules[1].ADV_UUIDS))],
+    )
+    assert asyncio.run(unknown.async_step_bluetooth(discovered)) == {
+        "step_id": "link_or_add"
     }
+    assert asyncio.run(unknown.async_step_link_or_add({"existing_entry": legacy.entry_id})) == {
+        "abort": "relinked"
+    }
+    assert legacy.unique_id == "OLD:ADDRESS"
+    assert legacy.data["address"] == "UNKNOWN:ADDRESS"
+    assert legacy.data["entity_identity"] == "OLD:ADDRESS"
+    assert "serial_number" not in legacy.data
+    assert hass.config_entries.reloaded[-1] == legacy.entry_id
+
+    repeat = flow_module.NubertConfigFlow()
+    repeat.hass = hass
+    assert asyncio.run(repeat.async_step_bluetooth(discovered)) == {
+        "abort": "already_configured"
+    }
+
+    new_speaker = flow_module.NubertConfigFlow()
+    new_speaker.hass = hass
+    assert asyncio.run(new_speaker._async_identify("BRAND:NEW")) is None
+    assert asyncio.run(new_speaker.async_step_link_or_add({"existing_entry": "new"})) == {
+        "title": "BRAND:NEW", "data": {"address": "BRAND:NEW"}
+    }
+
+    named = types.SimpleNamespace(
+        entry_id="named-entry", unique_id="OLD:ADDRESS", title="Living Room Right",
+        data={"address": "OLD:ADDRESS", "advertised_name": "nuPro Right"},
+    )
+    hass.config_entries.entries = [named]
+    hass.data = {"nubert": {named.entry_id: {"coordinator": types.SimpleNamespace(connected=False)}}}
+    by_name = flow_module.NubertConfigFlow()
+    by_name.hass = hass
+    candidate = types.SimpleNamespace(
+        address="NEW:ADDRESS", name="nuPro Right",
+        service_uuids=discovered.service_uuids, connectable=True,
+    )
+    assert asyncio.run(by_name.async_step_bluetooth(candidate)) == {"abort": "relinked"}
+    assert named.unique_id == "OLD:ADDRESS"
+    assert named.data["address"] == "NEW:ADDRESS"
+    assert named.data["advertised_name"] == "nuPro Right"
+
+    hass.data["nubert"][named.entry_id]["coordinator"].connected = True
+    by_name._candidate_name = "nuPro Right"
+    assert by_name._matching_name_entry() is None
+    hass.data["nubert"][named.entry_id]["coordinator"].connected = False
+
+    duplicate = types.SimpleNamespace(
+        entry_id="duplicate", unique_id="OTHER:ADDRESS", title="Other",
+        data={"address": "OTHER:ADDRESS", "advertised_name": "nuPro Right"},
+    )
+    hass.config_entries.entries.append(duplicate)
+    ambiguous = flow_module.NubertConfigFlow()
+    ambiguous.hass = hass
+    ambiguous._candidate_name = "nuPro Right"
+    assert ambiguous._matching_name_entry() is None
+
+    first_setup = flow_module.NubertConfigFlow()
+    first_setup._discovery_info = candidate
+    first_setup._candidate_name = "nuPro Right"
+    first_setup._serial_number = None
+    assert asyncio.run(first_setup.async_step_bluetooth_confirm({"name": "Living Room"})) == {
+        "title": "Living Room",
+        "data": {"address": "NEW:ADDRESS", "advertised_name": "nuPro Right"},
+    }
+
+    older = types.SimpleNamespace(
+        entry_id="older", unique_id="PREVIOUS:ADDRESS", title="nuPro Right",
+        data={"address": "PREVIOUS:ADDRESS"},
+    )
+    hass.config_entries.entries = [older]
+    hass.data = {"nubert": {older.entry_id: {"coordinator": types.SimpleNamespace(connected=False)}}}
+    migrated = flow_module.NubertConfigFlow()
+    migrated.hass = hass
+    assert asyncio.run(migrated.async_step_bluetooth(candidate)) == {"abort": "relinked"}
+    assert older.data["address"] == "NEW:ADDRESS"
+    assert older.data["advertised_name"] == "nuPro Right"
 
 
 def test_coordinator_requires_two_fresh_matching_serial_replies(modules):
@@ -407,3 +493,41 @@ def test_coordinator_requires_two_fresh_matching_serial_replies(modules):
     coordinator._query = no_batched_reply
     coordinator._write = bare_reply
     assert asyncio.run(coordinator.async_read_serial_number()) == b"ABC123".hex()
+
+
+def test_device_registry_lookup_uses_scoped_identifier(modules):
+    _p, _, _, _media = modules
+
+    class GenericCoordinator:
+        def __class_getitem__(cls, item):
+            return cls
+
+    _module("bleak", __path__=[])
+    _module("bleak.backends", __path__=[])
+    _module("bleak.backends.characteristic", BleakGATTCharacteristic=object)
+    _module("bleak.exc", BleakError=Exception)
+    _module("bleak_retry_connector", BleakClientWithServiceCache=object,
+            establish_connection=lambda *args, **kwargs: None)
+    _module("homeassistant.components.bluetooth", async_ble_device_from_address=lambda *args, **kwargs: None)
+    _module("homeassistant.core", HomeAssistant=object, callback=lambda fn: fn)
+    calls = []
+    registry = types.SimpleNamespace(
+        async_get_device_by_identifier=lambda identifier, entry_id: (
+            calls.append((identifier, entry_id)) or types.SimpleNamespace(id="device")
+        ),
+        async_update_device=lambda device_id, **kwargs: calls.append(device_id),
+    )
+    _module("homeassistant.helpers.device_registry", async_get=lambda hass: registry)
+    _module("homeassistant.helpers.update_coordinator", DataUpdateCoordinator=GenericCoordinator,
+            UpdateFailed=Exception)
+    module = _load("custom_components.nubert.coordinator", "coordinator.py")
+    coordinator = object.__new__(module.NubertSpeakerCoordinator)
+    coordinator.config_entry_id = "entry"
+    coordinator.identity = "old-address"
+    coordinator.hass = object()
+    coordinator.device = None
+    coordinator._is_x1_gatt = False
+    coordinator.versions = {}
+    coordinator._update_device_registry()
+    assert calls[0] == (("nubert", "old-address"), "entry")
+    assert calls[1] == "device"

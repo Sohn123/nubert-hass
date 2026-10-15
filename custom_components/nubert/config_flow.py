@@ -22,6 +22,7 @@ from .const import (
     DEFAULT_VOLUME_GAMMA,
     CONF_SERIAL_NUMBER,
     CONF_ENTITY_IDENTITY,
+    CONF_ADVERTISED_NAME,
 )
 from .coordinator import NubertSpeakerCoordinator
 from .volume import default_db_range, supported_db_range, valid_settings
@@ -37,6 +38,7 @@ class NubertConfigFlow(ConfigFlow, domain=DOMAIN):
     _discovery_info: BluetoothServiceInfo | None = None
     _serial_number: str | None = None
     _candidate_address: str | None = None
+    _candidate_name: str | None = None
     _pending_name: str | None = None
 
     @staticmethod
@@ -51,8 +53,27 @@ class NubertConfigFlow(ConfigFlow, domain=DOMAIN):
         if not _matches_nubert(discovery_info):
             return self.async_abort(reason="not_nubert")
 
+        if any(
+            entry.data.get(CONF_ADDRESS) == discovery_info.address
+            for entry in self._async_current_entries(include_ignore=False)
+        ):
+            return self.async_abort(reason="already_configured")
+
         self._discovery_info = discovery_info
-        result = await self._async_identify(discovery_info.address, discovery=True)
+        self._candidate_address = discovery_info.address
+        self._candidate_name = _advertised_name(discovery_info)
+        if getattr(discovery_info, "connectable", True) and (
+            match := self._matching_name_entry()
+        ):
+            _LOGGER.info(
+                "Relinking %s from %s to %s using Bluetooth name %r",
+                match.title, match.data[CONF_ADDRESS], discovery_info.address,
+                self._candidate_name,
+            )
+            await self._async_relink(match)
+            return self.async_abort(reason="relinked")
+
+        result = await self._async_identify(discovery_info.address)
         if result is not None:
             return result
 
@@ -60,7 +81,7 @@ class NubertConfigFlow(ConfigFlow, domain=DOMAIN):
             "name": discovery_info.name or discovery_info.address
         }
 
-        if self._serial_number and self._legacy_entries():
+        if self._legacy_entries():
             return await self.async_step_link_or_add()
 
         return await self.async_step_bluetooth_confirm()
@@ -76,6 +97,8 @@ class NubertConfigFlow(ConfigFlow, domain=DOMAIN):
         if user_input is not None:
             name = user_input.get(CONF_NAME) or title_default
             data = {CONF_ADDRESS: self._discovery_info.address}
+            if self._candidate_name:
+                data[CONF_ADVERTISED_NAME] = self._candidate_name
             if self._serial_number:
                 data[CONF_SERIAL_NUMBER] = self._serial_number
                 data[CONF_ENTITY_IDENTITY] = self.unique_id
@@ -100,13 +123,17 @@ class NubertConfigFlow(ConfigFlow, domain=DOMAIN):
         if user_input is not None:
             address = user_input[CONF_ADDRESS]
             name = user_input.get(CONF_NAME, address)
+            info = bluetooth.async_last_service_info(self.hass, address, connectable=True)
+            self._candidate_name = _advertised_name(info) if info else None
             result = await self._async_identify(address)
             if result is not None:
                 return result
             self._pending_name = name
-            if self._serial_number and self._legacy_entries():
+            if self._legacy_entries():
                 return await self.async_step_link_or_add()
             data = {CONF_ADDRESS: address}
+            if self._candidate_name:
+                data[CONF_ADVERTISED_NAME] = self._candidate_name
             if self._serial_number:
                 data[CONF_SERIAL_NUMBER] = self._serial_number
                 data[CONF_ENTITY_IDENTITY] = self.unique_id
@@ -146,9 +173,7 @@ class NubertConfigFlow(ConfigFlow, domain=DOMAIN):
 
         return self.async_show_form(step_id="user", data_schema=schema)
 
-    async def _async_identify(
-        self, address: str, *, discovery: bool = False
-    ) -> ConfigFlowResult | None:
+    async def _async_identify(self, address: str) -> ConfigFlowResult | None:
         """Probe a candidate before assigning its permanent config entry ID."""
         coordinator = NubertSpeakerCoordinator(self.hass, address, address)
         try:
@@ -161,12 +186,11 @@ class NubertConfigFlow(ConfigFlow, domain=DOMAIN):
 
         self._candidate_address = address
 
-        if self._serial_number is None:
-            for entry in self._async_current_entries(include_ignore=False):
-                if entry.data.get(CONF_ADDRESS) == address:
-                    return self.async_abort(reason="already_configured")
-            if discovery and self._async_current_entries(include_ignore=False):
-                return self.async_abort(reason="serial_unavailable")
+        if self._serial_number is None and any(
+            entry.data.get(CONF_ADDRESS) == address
+            for entry in self._async_current_entries(include_ignore=False)
+        ):
+            return self.async_abort(reason="already_configured")
 
         unique_id = f"serial:{self._serial_number}" if self._serial_number else address
         await self.async_set_unique_id(unique_id)
@@ -204,24 +228,45 @@ class NubertConfigFlow(ConfigFlow, domain=DOMAIN):
                 entries.append(entry)
         return entries
 
+    def _matching_name_entry(self) -> ConfigEntry | None:
+        """Use a stable advertised name only when one configured entry matches."""
+        if not self._candidate_name:
+            return None
+        matches = [
+            entry for entry in self._async_current_entries(include_ignore=False)
+            if not entry.data.get(CONF_SERIAL_NUMBER)
+            and (entry.data.get(CONF_ADVERTISED_NAME) or entry.title) == self._candidate_name
+        ]
+        if len(matches) != 1:
+            return None
+        stored = self.hass.data.get(DOMAIN, {}).get(matches[0].entry_id, {})
+        active = stored.get("coordinator")
+        return None if active and active.connected else matches[0]
+
     async def _async_relink(self, entry: ConfigEntry) -> None:
-        assert self._candidate_address and self._serial_number
+        assert self._candidate_address
+        data = {
+            **entry.data,
+            CONF_ADDRESS: self._candidate_address,
+            CONF_ENTITY_IDENTITY: entry.data.get(CONF_ENTITY_IDENTITY, entry.unique_id),
+        }
+        if self._serial_number:
+            data[CONF_SERIAL_NUMBER] = self._serial_number
+        if self._candidate_name:
+            data[CONF_ADVERTISED_NAME] = self._candidate_name
         self.hass.config_entries.async_update_entry(
             entry,
-            unique_id=f"serial:{self._serial_number}",
-            data={
-                **entry.data,
-                CONF_ADDRESS: self._candidate_address,
-                CONF_SERIAL_NUMBER: self._serial_number,
-                CONF_ENTITY_IDENTITY: entry.data.get(CONF_ENTITY_IDENTITY, entry.unique_id),
-            },
+            unique_id=(
+                f"serial:{self._serial_number}" if self._serial_number else entry.unique_id
+            ),
+            data=data,
         )
         await self.hass.config_entries.async_reload(entry.entry_id)
 
     async def async_step_link_or_add(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
-        """Allow a one-time match when an old address vanished before migration."""
+        """Let the user relink an entry when its Bluetooth address changes."""
         if user_input is not None:
             selected = user_input["existing_entry"]
             if selected != "new":
@@ -236,13 +281,15 @@ class NubertConfigFlow(ConfigFlow, domain=DOMAIN):
             if self._discovery_info is not None:
                 return await self.async_step_bluetooth_confirm()
             assert self._candidate_address is not None
+            data = {CONF_ADDRESS: self._candidate_address}
+            if self._candidate_name:
+                data[CONF_ADVERTISED_NAME] = self._candidate_name
+            if self._serial_number:
+                data[CONF_SERIAL_NUMBER] = self._serial_number
+                data[CONF_ENTITY_IDENTITY] = self.unique_id
             return self.async_create_entry(
                 title=self._pending_name or self._candidate_address,
-                data={
-                    CONF_ADDRESS: self._candidate_address,
-                    CONF_SERIAL_NUMBER: self._serial_number,
-                    CONF_ENTITY_IDENTITY: self.unique_id,
-                },
+                data=data,
             )
 
         choices = [selector.SelectOptionDict(value="new", label="Add as a new speaker")]
@@ -319,6 +366,12 @@ class NubertOptionsFlow(OptionsFlow):
 def _matches_nubert(info: BluetoothServiceInfo) -> bool:
     """Return True if the advertisement matches a Nubert speaker."""
     return any(u.lower() in ADV_UUIDS for u in (info.service_uuids or []))
+
+
+def _advertised_name(info: BluetoothServiceInfo) -> str | None:
+    """Return a usable Bluetooth name, separate from the HA display title."""
+    name = (info.name or "").strip()
+    return name if name and name != info.address else None
 
 
 def _maybe_nubert(info: BluetoothServiceInfo) -> bool:

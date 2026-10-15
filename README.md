@@ -15,14 +15,17 @@ The integration probes the speaker's serial-number command (`0x08`) twice. If
 the replies match, the serial identifies the speaker while its Bluetooth
 address can change. Existing entries adopt the serial on their next successful
 connection without changing their entity IDs or volume options. If the address
-changed before the serial was recorded, choose the old entry in the one-time
-relink dialog when the new address is discovered. If the command
-does not return a usable value, the integration keeps the address-based entry;
-automatic discovery will not add another address-based entry when Nubert
-speakers are already configured. In that case, add a genuinely new speaker
-manually. The serial response format has not yet been verified on hardware;
-enable debug logging for `custom_components.nubert.coordinator` to inspect the
-`0x08` payload before relying on address changes.
+changed before the serial was recorded, the integration can also match a
+speaker by its advertised Bluetooth name. It stores this name separately from
+the name shown in Home Assistant, so renaming the HA device does not affect
+matching. Automatic name matching requires exactly one configured speaker with
+that name and skips entries that are still connected. If the name is missing or
+shared by multiple speakers, open the newly discovered speaker under
+**Settings → Devices & services → Nubert** and choose the matching old entry in
+the relink dialog. This keeps its entities and volume options; the advertised
+name is saved for future power cycles. The serial response format has not yet
+been verified on hardware; enable debug logging for
+`custom_components.nubert.coordinator` to inspect the `0x08` payload.
 
 ## Volume options
 

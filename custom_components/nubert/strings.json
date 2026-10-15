@@ -4,14 +4,13 @@
       "already_configured": "This speaker is already configured.",
       "cannot_connect": "Could not connect to the speaker.",
       "serial_collision": "Another configured speaker reports this serial number and is still visible.",
-      "serial_unavailable": "This speaker did not provide a usable serial number. Add it manually if it is a new speaker.",
       "speaker_unavailable": "The selected previous speaker is no longer available for relinking.",
       "relinked": "This speaker was relinked to its existing integration entry."
     },
     "step": {
       "link_or_add": {
         "title": "Identify this speaker",
-        "description": "A previously configured speaker may have changed Bluetooth address. Choose its old entry to keep its entities and settings, or add this as a new speaker.",
+        "description": "The Bluetooth address may have changed. Choose the matching old speaker to keep its entities and settings, or add this as a new speaker. If two speakers look alike, check which one is powered on before choosing.",
         "data": {
           "existing_entry": "Speaker"
         }

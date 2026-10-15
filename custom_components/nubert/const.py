@@ -2,6 +2,7 @@ DOMAIN = "nubert"
 
 CONF_SERIAL_NUMBER = "serial_number"
 CONF_ENTITY_IDENTITY = "entity_identity"
+CONF_ADVERTISED_NAME = "advertised_name"
 
 CONF_MIN_VOLUME_DB = "min_volume_db"
 CONF_MAX_VOLUME_DB = "max_volume_db"

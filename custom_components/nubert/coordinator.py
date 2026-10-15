@@ -36,6 +36,7 @@ class NubertSpeakerCoordinator(DataUpdateCoordinator[None]):
     def __init__(
         self, hass: HomeAssistant, address: str, name: str | None,
         identity: str | None = None,
+        config_entry_id: str | None = None,
     ) -> None:
         super().__init__(
             hass,
@@ -45,6 +46,7 @@ class NubertSpeakerCoordinator(DataUpdateCoordinator[None]):
         )
         self.address = address
         self.identity = identity or address
+        self.config_entry_id = config_entry_id
         self.name = name or address
 
         # Raw payloads of the latest notification per response id.
@@ -306,8 +308,13 @@ class NubertSpeakerCoordinator(DataUpdateCoordinator[None]):
 
     @callback
     def _update_device_registry(self) -> None:
+        if self.config_entry_id is None:
+            return
         registry = dr.async_get(self.hass)
-        device = registry.async_get_device(identifiers={(DOMAIN, self.identity)})
+        if lookup := getattr(registry, "async_get_device_by_identifier", None):
+            device = lookup((DOMAIN, self.identity), self.config_entry_id)
+        else:
+            device = registry.async_get_device(identifiers={(DOMAIN, self.identity)})
         if device is None:
             return
         registry.async_update_device(
