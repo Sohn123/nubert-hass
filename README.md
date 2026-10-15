@@ -11,6 +11,17 @@ integration → Nubert) by picking or typing their Bluetooth address.
 The model is read from the speaker after connecting, and only the settings the
 official app offers for that model are created.
 
+## Volume options
+
+Open the integration's **Configure** dialog to set the minimum and maximum
+listening levels and the volume curve. The defaults are −70 dB, −30 dB, and
+gamma 1.0 on speakers that support that range. For example, a range of −60 dB
+to −20 dB makes the Home Assistant slider cover those listening levels; gamma
+2.0 gives finer control near the quiet end. Zero on the slider mutes the speaker.
+The maximum also limits volume-up commands from Home Assistant. Changes made
+with the speaker remote are shown in Home Assistant, but the integration does
+not change the remote's volume.
+
 ## Entities
 
 | Platform | Entities |

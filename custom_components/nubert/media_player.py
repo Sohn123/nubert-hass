@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from math import ceil, floor
 
 from homeassistant.components.media_player import (
     MediaPlayerEntity,
@@ -14,9 +15,16 @@ from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from . import protocol as p
-from .const import DOMAIN
+from .const import (
+    DOMAIN,
+    CONF_MIN_VOLUME_DB,
+    CONF_MAX_VOLUME_DB,
+    CONF_VOLUME_GAMMA,
+    DEFAULT_VOLUME_GAMMA,
+)
 from .coordinator import NubertSpeakerCoordinator
 from .entity import NubertEntity
+from .volume import default_db_range, level_to_raw, raw_to_level
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -37,11 +45,18 @@ class NubertMediaPlayer(NubertEntity, MediaPlayerEntity):
         | MediaPlayerEntityFeature.VOLUME_MUTE
     )
 
-    def __init__(self, coordinator: NubertSpeakerCoordinator, suggested_area: str | None) -> None:
+    def __init__(
+        self,
+        coordinator: NubertSpeakerCoordinator,
+        suggested_area: str | None,
+        entry: ConfigEntry | None = None,
+    ) -> None:
         super().__init__(coordinator, "media_player")
         # Unique id is the bare address for compatibility with earlier releases.
         self._attr_unique_id = coordinator.address
         self._suggested_area = suggested_area
+        self._entry = entry
+        self._muted_by_zero = False
 
     @property
     def device_info(self) -> DeviceInfo:
@@ -55,6 +70,16 @@ class NubertMediaPlayer(NubertEntity, MediaPlayerEntity):
         return p.volume_range(self.coordinator.model)
 
     @property
+    def _volume_settings(self) -> tuple[float, float, float]:
+        minimum, maximum = default_db_range(self.coordinator.model)
+        options = self._entry.options if self._entry else {}
+        return (
+            options.get(CONF_MIN_VOLUME_DB, minimum),
+            options.get(CONF_MAX_VOLUME_DB, maximum),
+            options.get(CONF_VOLUME_GAMMA, DEFAULT_VOLUME_GAMMA),
+        )
+
+    @property
     def state(self) -> MediaPlayerState | None:
         power = self.coordinator.power
         if power is None:
@@ -63,17 +88,19 @@ class NubertMediaPlayer(NubertEntity, MediaPlayerEntity):
 
     @property
     def volume_level(self) -> float | None:
+        if self._muted_by_zero and self.coordinator.muted:
+            return 0.0
         raw = self.coordinator.value(p.VOLUME_GET)
         if raw is None:
             return None
-        raw_max = self._volume_range[0]
-        return max(0.0, min(1.0, raw / raw_max))
+        return raw_to_level(raw, *self._volume_settings, self.coordinator.model)
 
     @property
     def volume_step(self) -> float:
         raw_max = self._volume_range[0]
+        minimum, maximum, _ = self._volume_settings
         # One dB per step on the subs, two dB on the main speakers.
-        return (2 if raw_max == 100 else 1) / raw_max
+        return min(1.0, (2 if raw_max == 100 else 1) / (maximum - minimum))
 
     @property
     def is_volume_muted(self) -> bool | None:
@@ -114,11 +141,54 @@ class NubertMediaPlayer(NubertEntity, MediaPlayerEntity):
         await self.coordinator.async_set(p.POWER_GET, p.POWER_SET, 0 if on else 1)
 
     async def async_set_volume_level(self, volume: float) -> None:
-        raw_max = self._volume_range[0]
-        raw = max(0, min(raw_max, round(volume * raw_max)))
-        await self.coordinator.async_set(p.VOLUME_GET, p.VOLUME_SET, raw)
+        if volume <= 0:
+            if not self.coordinator.muted:
+                await self.coordinator.async_set(p.MUTE_GET, p.MUTE_SET, 1)
+                self._muted_by_zero = True
+                self.async_write_ha_state()
+            return
+
+        raw = level_to_raw(volume, *self._volume_settings, self.coordinator.model)
+        if raw != self.coordinator.value(p.VOLUME_GET):
+            await self.coordinator.async_set(p.VOLUME_GET, p.VOLUME_SET, raw)
+        if self._muted_by_zero:
+            self._muted_by_zero = False
+            if self.coordinator.muted:
+                await self.coordinator.async_set(p.MUTE_GET, p.MUTE_SET, 0)
+            self.async_write_ha_state()
+
+    async def async_volume_up(self) -> None:
+        await self._step_volume(1)
+
+    async def async_volume_down(self) -> None:
+        await self._step_volume(-1)
+
+    async def _step_volume(self, direction: int) -> None:
+        raw = self.coordinator.value(p.VOLUME_GET)
+        if raw is None:
+            return
+        if self._muted_by_zero and self.coordinator.muted is False:
+            self._muted_by_zero = False
+        minimum, maximum, _ = self._volume_settings
+        raw_max, offset, _ = self._volume_range
+        step = 2 if raw_max == 100 else 1
+        upper = floor(maximum + offset)
+        lower = ceil(minimum + offset)
+        if direction > 0 and raw >= upper and not self._muted_by_zero:
+            return
+        if direction < 0 and (self._muted_by_zero or raw <= lower):
+            return
+        target = lower if self._muted_by_zero else max(lower, min(upper, raw + direction * step))
+        if target != raw:
+            await self.coordinator.async_set(p.VOLUME_GET, p.VOLUME_SET, target)
+        if self._muted_by_zero and direction > 0:
+            self._muted_by_zero = False
+            if self.coordinator.muted:
+                await self.coordinator.async_set(p.MUTE_GET, p.MUTE_SET, 0)
+            self.async_write_ha_state()
 
     async def async_mute_volume(self, mute: bool) -> None:
+        self._muted_by_zero = False
         await self.coordinator.async_set(p.MUTE_GET, p.MUTE_SET, 1 if mute else 0)
 
     async def async_select_source(self, source: str) -> None:
@@ -136,4 +206,6 @@ async def async_setup_entry(
 ) -> None:
     """Set up the media_player platform from a config entry."""
     coordinator: NubertSpeakerCoordinator = hass.data[DOMAIN][entry.entry_id]["coordinator"]
-    async_add_entities([NubertMediaPlayer(coordinator, entry.data.get(ATTR_SUGGESTED_AREA))])
+    async_add_entities(
+        [NubertMediaPlayer(coordinator, entry.data.get(ATTR_SUGGESTED_AREA), entry)]
+    )

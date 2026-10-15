@@ -7,12 +7,21 @@ from homeassistant.components import bluetooth
 from homeassistant.components.bluetooth import (  # type: ignore
     BluetoothServiceInfo,
 )
-from homeassistant.config_entries import ConfigFlow, ConfigFlowResult
+from homeassistant.config_entries import ConfigFlow, ConfigFlowResult, OptionsFlow
 from homeassistant.const import CONF_ADDRESS, CONF_NAME
 from homeassistant.helpers import selector
 import voluptuous as vol
 
-from .const import DOMAIN, ADV_UUIDS, ADV_UUIDS_EXTRA
+from .const import (
+    DOMAIN,
+    ADV_UUIDS,
+    ADV_UUIDS_EXTRA,
+    CONF_MIN_VOLUME_DB,
+    CONF_MAX_VOLUME_DB,
+    CONF_VOLUME_GAMMA,
+    DEFAULT_VOLUME_GAMMA,
+)
+from .volume import default_db_range, supported_db_range, valid_settings
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -23,6 +32,10 @@ class NubertConfigFlow(ConfigFlow, domain=DOMAIN):
     VERSION = 1
 
     _discovery_info: BluetoothServiceInfo | None = None
+
+    @staticmethod
+    def async_get_options_flow(config_entry) -> NubertOptionsFlow:
+        return NubertOptionsFlow(config_entry)
 
     async def async_step_bluetooth(
         self, discovery_info: BluetoothServiceInfo
@@ -112,6 +125,57 @@ class NubertConfigFlow(ConfigFlow, domain=DOMAIN):
             )
 
         return self.async_show_form(step_id="user", data_schema=schema)
+
+
+class NubertOptionsFlow(OptionsFlow):
+    """Configure the listening range for a detected speaker."""
+
+    def __init__(self, config_entry) -> None:
+        self._entry = config_entry
+
+    async def async_step_init(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        stored = self.hass.data.get(DOMAIN, {}).get(self._entry.entry_id, {})
+        coordinator = stored.get("coordinator")
+        if coordinator is None:
+            return self.async_abort(reason="speaker_unavailable")
+        model = coordinator.model
+        low, high = supported_db_range(model)
+        default_min, default_max = default_db_range(model)
+        options = self._entry.options
+        errors = {}
+        if user_input is not None:
+            if valid_settings(
+                user_input[CONF_MIN_VOLUME_DB], user_input[CONF_MAX_VOLUME_DB],
+                user_input[CONF_VOLUME_GAMMA], model,
+            ):
+                return self.async_create_entry(title="", data=user_input)
+            errors["base"] = "invalid_volume_range"
+
+        db_selector = selector.NumberSelector(
+            selector.NumberSelectorConfig(
+                min=low, max=high, step=1, mode=selector.NumberSelectorMode.BOX
+            )
+        )
+        gamma_selector = selector.NumberSelector(
+            selector.NumberSelectorConfig(
+                min=0.5, max=3.0, step=0.1, mode=selector.NumberSelectorMode.BOX
+            )
+        )
+        schema = vol.Schema({
+            vol.Required(
+                CONF_MIN_VOLUME_DB, default=options.get(CONF_MIN_VOLUME_DB, default_min)
+            ): db_selector,
+            vol.Required(
+                CONF_MAX_VOLUME_DB, default=options.get(CONF_MAX_VOLUME_DB, default_max)
+            ): db_selector,
+            vol.Required(
+                CONF_VOLUME_GAMMA,
+                default=options.get(CONF_VOLUME_GAMMA, DEFAULT_VOLUME_GAMMA),
+            ): gamma_selector,
+        })
+        return self.async_show_form(step_id="init", data_schema=schema, errors=errors)
 
 
 def _matches_nubert(info: BluetoothServiceInfo) -> bool:

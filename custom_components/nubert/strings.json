@@ -1,0 +1,19 @@
+{
+  "options": {
+    "abort": {
+      "speaker_unavailable": "Connect to the speaker before changing volume options."
+    },
+    "step": {
+      "init": {
+        "data": {
+          "min_volume_db": "Minimum volume (dB)",
+          "max_volume_db": "Maximum volume (dB)",
+          "volume_gamma": "Volume curve (gamma)"
+        }
+      }
+    },
+    "error": {
+      "invalid_volume_range": "Minimum must be below maximum, both must fit the speaker's range, and gamma must be between 0.5 and 3.0."
+    }
+  }
+}

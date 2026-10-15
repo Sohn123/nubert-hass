@@ -46,6 +46,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     hass.data[DOMAIN][entry.entry_id] = {"coordinator": coordinator}
 
+    # Re-render the media player when options change; its settings are read live.
+    async def _options_updated(_hass: HomeAssistant, _entry: ConfigEntry) -> None:
+        coordinator.async_update_listeners()
+
+    entry.async_on_unload(entry.add_update_listener(_options_updated))
+
     # Platforms register the settings their entities need; read them now.
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     await coordinator.async_refresh_settings()
