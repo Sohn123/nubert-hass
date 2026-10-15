@@ -74,7 +74,7 @@ SET payload has the same encoding.
 | Firmware versions | 02 (`02 00`) | – | response `02 len kind ascii…`; kind 0 MCU, 1 DSP, 2 Bluetooth, 3 Wireless, 4 Hardware | all |
 | Device (BLE) name | – | 05 | ASCII bytes | all |
 | Factory reset | – | 07 | 1 = reset, 0 = cancel | all |
-| Serial number | 08 | – | (unused by app) | |
+| Serial number | 08 | – | Expected reply framing is `08 <length> <payload…>` (possibly inside an `86` batch reply). Payload encoding and stability still need hardware verification. The integration retains the complete payload as hex. | |
 | Volume | 0A | 0B | main: 0–100 ⇒ −100…0 dB; X-Sub: 0–21 ⇒ −15…+6 dB; Z1: 0–20 ⇒ −14…+6 dB | all |
 | Input | 0E | 0F | index, see input table; ampXL adds a 2nd byte = network source (1 AirPlay, 2 DMR, 3 DMP, 4 Spotify, 24 Google) | all |
 | 5-band EQ | 10 | 11 | GET → 5 bytes (60 Hz, 240 Hz, 1 kHz, 3.5 kHz, 16 kHz), raw 0–12 ⇒ −6…+6 dB; SET `[band, raw]` | main except deCodeX |

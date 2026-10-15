@@ -220,3 +220,190 @@ def test_invalid_settings(modules):
                      (-70, 1, 1), (-70, -30, 0), (-70, -30, 3.1)]:
         assert not v.valid_settings(*settings, p.X2)
     assert not v.valid_settings(-70, -30, 1, p.Z1)
+
+
+def test_serial_frames_and_conservative_validation(modules):
+    p, _, _, _ = modules
+    payload = b"SN12345"
+    assert p.parse_frames(p.frame(p.SERIAL_NUMBER_GET, *payload)) == [
+        (p.SERIAL_NUMBER_GET, payload)
+    ]
+    wrapped = p.frame(p.NEW_INFO_GET, *p.frame(p.SERIAL_NUMBER_GET, *payload))
+    assert p.parse_frames(wrapped) == [(p.SERIAL_NUMBER_GET, payload)]
+    assert p.serial_number(payload) == payload.hex()
+    for invalid in (None, b"", b"\x00" * 8, b"\xff" * 8, b"A" * 33):
+        assert p.serial_number(invalid) is None
+
+
+def test_serial_discovery_reuses_entry_and_relinks_legacy(modules):
+    """A changed address updates an entry without replacing its entity identity."""
+
+    class FlowBase:
+        def __init_subclass__(cls, **kwargs):
+            pass
+
+        async def async_set_unique_id(self, unique_id):
+            self.unique_id = unique_id
+
+        def _async_current_entries(self, include_ignore=False):
+            return self.hass.config_entries.entries
+
+        def async_abort(self, reason):
+            return {"abort": reason}
+
+        def async_create_entry(self, title, data):
+            return {"title": title, "data": data}
+
+        def async_show_form(self, step_id, data_schema=None, **kwargs):
+            return {"step_id": step_id}
+
+    class Probe:
+        serial = "534e313233"
+
+        def __init__(self, hass, address, name):
+            pass
+
+        async def async_read_serial_number(self):
+            return self.serial
+
+        async def async_disconnect(self):
+            pass
+
+    class Entries:
+        def __init__(self, entry):
+            self.entries = [entry]
+            self.reloaded = []
+
+        def async_entry_for_domain_unique_id(self, domain, unique_id):
+            return next((entry for entry in self.entries if entry.unique_id == unique_id), None)
+
+        def async_update_entry(self, entry, *, data, unique_id=None):
+            entry.data = data
+            if unique_id is not None:
+                entry.unique_id = unique_id
+
+        async def async_reload(self, entry_id):
+            self.reloaded.append(entry_id)
+
+    class Select:
+        def __init__(self, config):
+            pass
+
+        def __call__(self, value):
+            return value
+
+    select = _module(
+        "homeassistant.helpers.selector",
+        SelectSelector=Select,
+        SelectSelectorConfig=lambda **kwargs: kwargs,
+        SelectSelectorMode=types.SimpleNamespace(DROPDOWN="dropdown"),
+        SelectOptionDict=lambda **kwargs: kwargs,
+        NumberSelector=Select,
+        NumberSelectorConfig=lambda **kwargs: kwargs,
+        NumberSelectorMode=types.SimpleNamespace(BOX="box"),
+    )
+    sys.modules["homeassistant.helpers"].selector = select
+    _module("homeassistant.components.bluetooth", BluetoothServiceInfo=object,
+            async_discovered_service_info=lambda hass: [])
+    _module("homeassistant.config_entries", ConfigEntry=object, ConfigFlow=FlowBase,
+            ConfigFlowResult=dict, OptionsFlow=object)
+    _module("homeassistant.const", CONF_ADDRESS="address", CONF_NAME="name")
+    _module("custom_components.nubert.coordinator", NubertSpeakerCoordinator=Probe)
+    flow_module = _load("custom_components.nubert.config_flow", "config_flow.py")
+
+    entry = types.SimpleNamespace(
+        entry_id="old-entry", unique_id="OLD:ADDRESS", title="Left",
+        data={"address": "OLD:ADDRESS", "entity_identity": "OLD:ADDRESS"},
+    )
+    hass = types.SimpleNamespace(config_entries=Entries(entry), data={})
+    flow = flow_module.NubertConfigFlow()
+    flow.hass = hass
+    assert asyncio.run(flow._async_identify("NEW:ADDRESS")) is None
+    assert asyncio.run(flow.async_step_link_or_add({"existing_entry": "old-entry"})) == {
+        "abort": "relinked"
+    }
+    assert entry.unique_id == "serial:534e313233"
+    assert entry.data["address"] == "NEW:ADDRESS"
+    assert entry.data["entity_identity"] == "OLD:ADDRESS"
+    assert hass.config_entries.reloaded == ["old-entry"]
+
+    next_flow = flow_module.NubertConfigFlow()
+    next_flow.hass = hass
+    assert asyncio.run(next_flow._async_identify("ANOTHER:ADDRESS")) == {
+        "abort": "already_configured"
+    }
+    assert entry.data["address"] == "ANOTHER:ADDRESS"
+    assert entry.data["entity_identity"] == "OLD:ADDRESS"
+
+    hass.data = {"nubert": {entry.entry_id: {"coordinator": types.SimpleNamespace(connected=True)}}}
+    collision = flow_module.NubertConfigFlow()
+    collision.hass = hass
+    assert asyncio.run(collision._async_identify("OTHER:ADDRESS")) == {
+        "abort": "serial_collision"
+    }
+    assert entry.data["address"] == "ANOTHER:ADDRESS"
+
+    Probe.serial = None
+    unknown = flow_module.NubertConfigFlow()
+    unknown.hass = hass
+    assert asyncio.run(unknown._async_identify("UNKNOWN:ADDRESS", discovery=True)) == {
+        "abort": "serial_unavailable"
+    }
+
+
+def test_coordinator_requires_two_fresh_matching_serial_replies(modules):
+    p, _, _, _ = modules
+
+    class GenericCoordinator:
+        def __class_getitem__(cls, item):
+            return cls
+
+    _module("bleak", __path__=[])
+    _module("bleak.backends", __path__=[])
+    _module("bleak.backends.characteristic", BleakGATTCharacteristic=object)
+    _module("bleak.exc", BleakError=Exception)
+    _module("bleak_retry_connector", BleakClientWithServiceCache=object,
+            establish_connection=lambda *args, **kwargs: None)
+    _module("homeassistant.components.bluetooth", async_ble_device_from_address=lambda *args, **kwargs: None)
+    _module("homeassistant.core", HomeAssistant=object, callback=lambda fn: fn)
+    _module("homeassistant.helpers.device_registry", async_get=lambda hass: None)
+    _module("homeassistant.helpers.update_coordinator", DataUpdateCoordinator=GenericCoordinator,
+            UpdateFailed=Exception)
+    module = _load("custom_components.nubert.coordinator", "coordinator.py")
+    coordinator = object.__new__(module.NubertSpeakerCoordinator)
+    coordinator._poll_lock = asyncio.Lock()
+    coordinator.address = "test"
+    coordinator.device = object()
+    coordinator.raw = {}
+    replies = [b"ABC123", b"ABC123"]
+
+    async def connected():
+        pass
+
+    async def query(commands):
+        assert commands == [p.SERIAL_NUMBER_GET]
+        coordinator.raw[p.SERIAL_NUMBER_GET] = replies.pop(0)
+
+    coordinator._ensure_connected = connected
+    coordinator._query = query
+    assert asyncio.run(coordinator.async_read_serial_number()) == b"ABC123".hex()
+    replies[:] = [b"ABC123", b"DEF456"]
+    assert asyncio.run(coordinator.async_read_serial_number()) is None
+    replies[:] = [b"\x00\x00"]
+    assert asyncio.run(coordinator.async_read_serial_number()) is None
+
+    coordinator._pending_event = asyncio.Event()
+    coordinator._pending = set()
+    replies[:] = [b"ABC123", b"ABC123"]
+
+    async def no_batched_reply(commands):
+        assert commands == [p.SERIAL_NUMBER_GET]
+
+    async def bare_reply(frame):
+        assert frame == p.frame(p.SERIAL_NUMBER_GET)
+        coordinator.raw[p.SERIAL_NUMBER_GET] = replies.pop(0)
+        coordinator._pending_event.set()
+
+    coordinator._query = no_batched_reply
+    coordinator._write = bare_reply
+    assert asyncio.run(coordinator.async_read_serial_number()) == b"ABC123".hex()

@@ -52,8 +52,8 @@ class NubertMediaPlayer(NubertEntity, MediaPlayerEntity):
         entry: ConfigEntry | None = None,
     ) -> None:
         super().__init__(coordinator, "media_player")
-        # Unique id is the bare address for compatibility with earlier releases.
-        self._attr_unique_id = coordinator.address
+        # Legacy entries retain their old address-based entity ID after relinking.
+        self._attr_unique_id = coordinator.identity
         self._suggested_area = suggested_area
         self._entry = entry
         self._muted_by_zero = False

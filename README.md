@@ -11,6 +11,19 @@ integration → Nubert) by picking or typing their Bluetooth address.
 The model is read from the speaker after connecting, and only the settings the
 official app offers for that model are created.
 
+The integration probes the speaker's serial-number command (`0x08`) twice. If
+the replies match, the serial identifies the speaker while its Bluetooth
+address can change. Existing entries adopt the serial on their next successful
+connection without changing their entity IDs or volume options. If the address
+changed before the serial was recorded, choose the old entry in the one-time
+relink dialog when the new address is discovered. If the command
+does not return a usable value, the integration keeps the address-based entry;
+automatic discovery will not add another address-based entry when Nubert
+speakers are already configured. In that case, add a genuinely new speaker
+manually. The serial response format has not yet been verified on hardware;
+enable debug logging for `custom_components.nubert.coordinator` to inspect the
+`0x08` payload before relying on address changes.
+
 ## Volume options
 
 Open the integration's **Configure** dialog to set the minimum and maximum

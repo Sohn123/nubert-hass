@@ -33,7 +33,10 @@ CORE_QUERIES = (p.POWER_GET, p.VOLUME_GET, p.SOURCE_GET, p.MUTE_GET, p.IS_SLAVE)
 class NubertSpeakerCoordinator(DataUpdateCoordinator[None]):
     """Keeps a BLE connection open and mirrors the speaker state."""
 
-    def __init__(self, hass: HomeAssistant, address: str, name: str | None) -> None:
+    def __init__(
+        self, hass: HomeAssistant, address: str, name: str | None,
+        identity: str | None = None,
+    ) -> None:
         super().__init__(
             hass,
             _LOGGER,
@@ -41,6 +44,7 @@ class NubertSpeakerCoordinator(DataUpdateCoordinator[None]):
             update_interval=UPDATE_INTERVAL,
         )
         self.address = address
+        self.identity = identity or address
         self.name = name or address
 
         # Raw payloads of the latest notification per response id.
@@ -79,6 +83,10 @@ class NubertSpeakerCoordinator(DataUpdateCoordinator[None]):
     @property
     def new_type(self) -> bool:
         return bool(self.device and self.device.new_type)
+
+    @property
+    def connected(self) -> bool:
+        return bool(self._client and self._client.is_connected)
 
     @property
     def source_names(self) -> dict[int, str]:
@@ -122,6 +130,40 @@ class NubertSpeakerCoordinator(DataUpdateCoordinator[None]):
         """Have the coordinator poll a GET id for an entity."""
         if cmd not in CORE_QUERIES:
             self._setting_queries.add(cmd)
+
+    async def async_read_serial_number(self) -> str | None:
+        """Read the undocumented serial twice before trusting it as identity."""
+        async with self._poll_lock:
+            await self._ensure_connected()
+            if self.device is None:
+                await self._query([p.IS_SLAVE])
+            readings = []
+            for _ in range(2):
+                self.raw.pop(p.SERIAL_NUMBER_GET, None)
+                await self._query([p.SERIAL_NUMBER_GET])
+                if p.SERIAL_NUMBER_GET not in self.raw:
+                    # Some informational GETs are sent bare by the app.
+                    self._pending = {p.SERIAL_NUMBER_GET}
+                    self._pending_event.clear()
+                    await self._write(p.frame(p.SERIAL_NUMBER_GET))
+                    with suppress(asyncio.TimeoutError):
+                        await asyncio.wait_for(
+                            self._pending_event.wait(), RESPONSE_TIMEOUT
+                        )
+                    self._pending.clear()
+                payload = self.raw.get(p.SERIAL_NUMBER_GET)
+                _LOGGER.debug(
+                    "Serial 0x08 payload from %s: %s",
+                    self.address,
+                    payload.hex() if payload is not None else "no reply",
+                )
+                reading = p.serial_number(payload)
+                if reading is None:
+                    return None
+                readings.append(reading)
+            if readings[0] and readings[0] == readings[1]:
+                return readings[0]
+            return None
 
     # ------------------------------------------------------------- connection
 
@@ -265,7 +307,7 @@ class NubertSpeakerCoordinator(DataUpdateCoordinator[None]):
     @callback
     def _update_device_registry(self) -> None:
         registry = dr.async_get(self.hass)
-        device = registry.async_get_device(identifiers={(DOMAIN, self.address)})
+        device = registry.async_get_device(identifiers={(DOMAIN, self.identity)})
         if device is None:
             return
         registry.async_update_device(

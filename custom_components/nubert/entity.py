@@ -34,13 +34,13 @@ class NubertEntity(CoordinatorEntity[NubertSpeakerCoordinator]):
 
     def __init__(self, coordinator: NubertSpeakerCoordinator, key: str) -> None:
         super().__init__(coordinator)
-        self._attr_unique_id = f"{coordinator.address}_{key}"
+        self._attr_unique_id = f"{coordinator.identity}_{key}"
 
     @property
     def device_info(self) -> DeviceInfo:
         coordinator = self.coordinator
         return DeviceInfo(
-            identifiers={(DOMAIN, coordinator.address)},
+            identifiers={(DOMAIN, coordinator.identity)},
             connections={(CONNECTION_BLUETOOTH, coordinator.address)},
             name=coordinator.name,
             manufacturer="Nubert",
