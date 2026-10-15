@@ -452,6 +452,7 @@ def test_coordinator_requires_two_fresh_matching_serial_replies(modules):
             establish_connection=lambda *args, **kwargs: None)
     _module("homeassistant.components.bluetooth", async_ble_device_from_address=lambda *args, **kwargs: None)
     _module("homeassistant.core", HomeAssistant=object, callback=lambda fn: fn)
+    _module("homeassistant.exceptions", HomeAssistantError=Exception)
     _module("homeassistant.helpers.device_registry", async_get=lambda hass: None)
     _module("homeassistant.helpers.update_coordinator", DataUpdateCoordinator=GenericCoordinator,
             UpdateFailed=Exception)
@@ -510,24 +511,107 @@ def test_device_registry_lookup_uses_scoped_identifier(modules):
             establish_connection=lambda *args, **kwargs: None)
     _module("homeassistant.components.bluetooth", async_ble_device_from_address=lambda *args, **kwargs: None)
     _module("homeassistant.core", HomeAssistant=object, callback=lambda fn: fn)
+    class HomeAssistantError(Exception):
+        pass
+
+    _module("homeassistant.exceptions", HomeAssistantError=HomeAssistantError)
     calls = []
+    device = types.SimpleNamespace(
+        id="device", connections={
+            ("bluetooth", "old-address"),
+            ("bluetooth", "older-address"),
+            ("other", "keep"),
+        }
+    )
     registry = types.SimpleNamespace(
         async_get_device_by_identifier=lambda identifier, entry_id: (
-            calls.append((identifier, entry_id)) or types.SimpleNamespace(id="device")
+            calls.append((identifier, entry_id)) or device
         ),
-        async_update_device=lambda device_id, **kwargs: calls.append(device_id),
+        async_update_device=lambda device_id, **kwargs: calls.append((device_id, kwargs)),
     )
-    _module("homeassistant.helpers.device_registry", async_get=lambda hass: registry)
+    _module("homeassistant.helpers.device_registry", async_get=lambda hass: registry,
+            CONNECTION_BLUETOOTH="bluetooth", DeviceInfo=dict)
+    class CoordinatorEntity:
+        def __class_getitem__(cls, item):
+            return cls
+
+        def __init__(self, coordinator):
+            self.coordinator = coordinator
+
+        @property
+        def available(self):
+            return self.coordinator.last_update_success
+
     _module("homeassistant.helpers.update_coordinator", DataUpdateCoordinator=GenericCoordinator,
-            UpdateFailed=Exception)
+            UpdateFailed=Exception, CoordinatorEntity=CoordinatorEntity)
     module = _load("custom_components.nubert.coordinator", "coordinator.py")
     coordinator = object.__new__(module.NubertSpeakerCoordinator)
     coordinator.config_entry_id = "entry"
     coordinator.identity = "old-address"
+    coordinator.address = "new-address"
+    coordinator.name = "Speaker"
     coordinator.hass = object()
     coordinator.device = None
     coordinator._is_x1_gatt = False
     coordinator.versions = {}
+    coordinator.last_update_success = True
+    coordinator.async_update_listeners = lambda: calls.append("updated")
     coordinator._update_device_registry()
     assert calls[0] == (("nubert", "old-address"), "entry")
-    assert calls[1] == "device"
+    assert calls[1][0] == "device"
+    assert calls[1][1]["new_connections"] == {
+        ("bluetooth", "new-address"), ("other", "keep")
+    }
+
+    legacy_updates = []
+    legacy_registry = types.SimpleNamespace(
+        async_get_device=lambda **kwargs: device,
+        async_update_device=lambda device_id, **kwargs: legacy_updates.append(kwargs),
+    )
+    module.dr.async_get = lambda hass: legacy_registry
+    coordinator._update_device_registry()
+    assert "new_connections" not in legacy_updates[0]
+
+    entity = _load("custom_components.nubert.entity", "entity.py").NubertEntity(
+        coordinator, "sensor"
+    )
+    old_client = types.SimpleNamespace(is_connected=True)
+    coordinator._client = old_client
+    coordinator._write_char = object()
+    assert entity.available
+    coordinator._on_disconnect(old_client)
+    assert not entity.available
+    assert calls[-1] == "updated"
+
+    current_client = types.SimpleNamespace(is_connected=True)
+    coordinator._client = current_client
+    coordinator._on_disconnect(old_client)
+    assert coordinator._client is current_client
+
+    class SlowClient:
+        is_connected = True
+
+        async def disconnect(self):
+            assert not entity.available
+
+    coordinator._client = SlowClient()
+    asyncio.run(coordinator.async_disconnect())
+    assert not entity.available
+
+    async def connected():
+        pass
+
+    async def timed_out(_data):
+        raise TimeoutError("proxy timed out")
+
+    disconnected = []
+    async def disconnect():
+        disconnected.append(True)
+        coordinator._client = None
+
+    coordinator._ensure_connected = connected
+    coordinator._write = timed_out
+    coordinator.async_disconnect = disconnect
+    with pytest.raises(HomeAssistantError, match="Speaker is unavailable"):
+        asyncio.run(coordinator.async_send(0x1F, 0))
+    assert disconnected == [True]

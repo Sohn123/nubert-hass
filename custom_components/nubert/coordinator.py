@@ -14,6 +14,7 @@ from bleak_retry_connector import BleakClientWithServiceCache, establish_connect
 
 from homeassistant.components.bluetooth import async_ble_device_from_address
 from homeassistant.core import HomeAssistant, callback
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
@@ -257,14 +258,20 @@ class NubertSpeakerCoordinator(DataUpdateCoordinator[None]):
             await self._write(p.frame(p.BLE_CONNECT_INDICATION, 0))
 
     @callback
-    def _on_disconnect(self, _client: Any) -> None:
+    def _on_disconnect(self, client: Any) -> None:
+        if self._client is not client:
+            return
         _LOGGER.debug("Disconnected from %s", self.address)
         self._client = None
         self._write_char = None
+        self.async_update_listeners()
 
     async def async_disconnect(self) -> None:
         """Cleanly disconnect BLE client."""
         client, self._client = self._client, None
+        self._write_char = None
+        if client:
+            self.async_update_listeners()
         if client and client.is_connected:
             with suppress(Exception):
                 await client.disconnect()
@@ -311,18 +318,26 @@ class NubertSpeakerCoordinator(DataUpdateCoordinator[None]):
         if self.config_entry_id is None:
             return
         registry = dr.async_get(self.hass)
-        if lookup := getattr(registry, "async_get_device_by_identifier", None):
+        lookup = getattr(registry, "async_get_device_by_identifier", None)
+        if lookup:
             device = lookup((DOMAIN, self.identity), self.config_entry_id)
         else:
             device = registry.async_get_device(identifiers={(DOMAIN, self.identity)})
         if device is None:
             return
-        registry.async_update_device(
-            device.id,
-            model=p.MODEL_NAMES.get(self.model),
-            sw_version=self.versions.get("mcu"),
-            hw_version=self.versions.get("hardware"),
-        )
+        updates: dict[str, Any] = {
+            "model": p.MODEL_NAMES.get(self.model),
+            "sw_version": self.versions.get("mcu"),
+            "hw_version": self.versions.get("hardware"),
+        }
+        if lookup:
+            connections = {
+                connection for connection in device.connections
+                if connection[0] != dr.CONNECTION_BLUETOOTH
+            }
+            connections.add((dr.CONNECTION_BLUETOOTH, self.address))
+            updates["new_connections"] = connections
+        registry.async_update_device(device.id, **updates)
 
     # ---------------------------------------------------------------- writing
 
@@ -336,8 +351,12 @@ class NubertSpeakerCoordinator(DataUpdateCoordinator[None]):
 
     async def async_send(self, cmd: int, *payload: int) -> None:
         """Send a SET frame, reconnecting if needed."""
-        await self._ensure_connected()
-        await self._write(p.frame(cmd, *payload))
+        try:
+            await self._ensure_connected()
+            await self._write(p.frame(cmd, *payload))
+        except (BleakError, TimeoutError, UpdateFailed) as err:
+            await self.async_disconnect()
+            raise HomeAssistantError(f"Nubert speaker {self.name} is unavailable") from err
 
     async def async_set(self, get_cmd: int, set_cmd: int, *payload: int) -> None:
         """Send a single byte setting and update the cached value."""

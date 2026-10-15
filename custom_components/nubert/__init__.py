@@ -84,6 +84,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     # Platforms register the settings their entities need; read them now.
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+    coordinator._update_device_registry()
     await coordinator.async_refresh_settings()
 
     return True

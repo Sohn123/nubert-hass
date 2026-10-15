@@ -37,6 +37,10 @@ class NubertEntity(CoordinatorEntity[NubertSpeakerCoordinator]):
         self._attr_unique_id = f"{coordinator.identity}_{key}"
 
     @property
+    def available(self) -> bool:
+        return super().available and self.coordinator.connected
+
+    @property
     def device_info(self) -> DeviceInfo:
         coordinator = self.coordinator
         return DeviceInfo(

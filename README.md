@@ -26,6 +26,8 @@ the relink dialog. This keeps its entities and volume options; the advertised
 name is saved for future power cycles. The serial response format has not yet
 been verified on hardware; enable debug logging for
 `custom_components.nubert.coordinator` to inspect the `0x08` payload.
+The device page shows only the current Bluetooth address. When a speaker
+disconnects, its entities become unavailable until it reconnects.
 
 ## Volume options
 
